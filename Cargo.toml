@@ -1,0 +1,10 @@
+[package]
+name = "skeuit"
+version = "0.1.0"
+authors = ["Robin Markowitz <robin.mwitz@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+serenity = { version = "0.10", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+sqlx = { version = "0.5.7", features = ["runtime-tokio-rustls", "sqlite", "offline"] }
