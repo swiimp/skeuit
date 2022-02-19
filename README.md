@@ -1,3 +1,7 @@
+# skeuit: my bot
+
+Wow, Covid amirite? This is a work-in-progress.
+
 # Setting up the database
 
 In order to compile the project, a database needs to be set-up. That's because SQLx accesses the
