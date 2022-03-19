@@ -1,2 +1,5 @@
-database.sqlite*
+.env
+*.sqlite
+diesel.toml
 /target
+/migrations
