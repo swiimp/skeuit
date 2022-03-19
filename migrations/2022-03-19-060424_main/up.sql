@@ -1,5 +1,5 @@
 CREATE TABLE messages (
   id INTEGER PRIMARY KEY,
-  messageId TEXT NOT NULL,
+  message_id TEXT NOT NULL,
   body TEXT NOT NULL
 )
