@@ -5,15 +5,34 @@ pub mod models;
 extern crate diesel;
 extern crate dotenv;
 
-use diesel::prelude::*;
-use diesel::sqlite::SqliteConnection;
+use diesel::pg::PgConnection;
+use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use dotenv::dotenv;
 use std::env;
 
-pub fn establish_connection() -> SqliteConnection {
-    dotenv().ok();
+use self::models::{NewMessage, Message};
 
+pub fn establish_connection() -> Pool<ConnectionManager<PgConnection>> {
+    dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    SqliteConnection::establish(&database_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", database_url))
+
+    let manager = ConnectionManager::<PgConnection>::new(database_url);
+
+    Pool::builder()
+        .max_size(15)
+        .build(manager)
+        .expect("Failed to connect to database.")
+}
+
+pub fn create_post(conn: &mut PooledConnection<ConnectionManager<PgConnection>>,
+                   message_id: &str, body: &str) -> Message {
+    use crate::diesel::RunQueryDsl;
+    use crate::schema::messages;
+
+    let new_message = NewMessage { message_id, body };
+
+    diesel::insert_into(messages::table)
+        .values(&new_message)
+        .get_result(conn)
+        .expect("Error saving new post")
 }
