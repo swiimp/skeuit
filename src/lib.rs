@@ -1,5 +1,5 @@
-pub mod schema;
 pub mod models;
+pub mod schema;
 
 #[macro_use]
 extern crate diesel;
@@ -10,7 +10,7 @@ use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use dotenv::dotenv;
 use std::env;
 
-use self::models::{NewMessage, Message};
+use self::models::{Message, NewMessage};
 
 pub fn establish_connection() -> Pool<ConnectionManager<PgConnection>> {
     dotenv().ok();
@@ -24,8 +24,11 @@ pub fn establish_connection() -> Pool<ConnectionManager<PgConnection>> {
         .expect("Failed to connect to database.")
 }
 
-pub fn create_post(conn: &mut PooledConnection<ConnectionManager<PgConnection>>,
-                   message_id: &str, body: &str) -> Message {
+pub fn create_post(
+    conn: &mut PooledConnection<ConnectionManager<PgConnection>>,
+    message_id: &str,
+    body: &str,
+) -> Message {
     use crate::diesel::RunQueryDsl;
     use crate::schema::messages;
 

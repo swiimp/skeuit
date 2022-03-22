@@ -8,7 +8,7 @@ pub struct Message {
 }
 
 #[derive(Insertable)]
-#[table_name="messages"]
+#[table_name = "messages"]
 pub struct NewMessage<'a> {
     pub message_id: &'a str,
     pub body: &'a str,
