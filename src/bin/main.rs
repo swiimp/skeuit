@@ -5,17 +5,16 @@ use std::{
     collections::HashMap,
     env,
     // io::Error as IoError,
-    net::SocketAddr,
+    // net::SocketAddr,
     sync::Mutex,
 };
 // use diesel::prelude::*;
 use diesel::pg::PgConnection;
-use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
+use diesel::r2d2::{ConnectionManager, Pool, /* PooledConnection */};
 use dotenv::dotenv;
-use futures_util::{future, pin_mut, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use futures_util::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, WebSocketStream};
 
 use skeuit::establish_connection;
 // use skeuit::models::*;
@@ -26,17 +25,22 @@ struct Bot {
     heartbeat_int: u64,
     session_id: String,
     database: Pool<ConnectionManager<PgConnection>>,
+    stream: WebSocketStream<TcpStream>,
 }
 
 struct Packet {
     op: u64,
     d:  String,
-    s:  u64,
     t:  String,
+    s:  u64,
 }
 
 impl Bot {
-    pub async fn get_sequence_number(&self) -> u64 {
+    // pub fn new() -> Bot {
+    //     Bot{}
+    // }
+
+    async fn get_sequence_number(&self) -> u64 {
         let mut seq_num = self.seq_num.lock().unwrap();
         *seq_num += 1;
         *seq_num
@@ -44,41 +48,24 @@ impl Bot {
 }
 
 impl Packet {
-    pub fn new(op_code: u64, data: String, seq_num: u64, type: String) -> Packet {
-        Packet{ op: op_code, d: data, s: seq_num, t: type }
+    pub fn new(op_code: u64, data: String, transaction_type: String, seq_num: u64) -> Packet {
+        Packet{ op: op_code, d: data, t: transaction_type, s: seq_num}
     }
 
     pub fn to_string(&self) -> String {
+        let mut result: String;
         if self.op != 0 {
-            format!("{\"op\":{},\"d\":{},\"t\":null,\"s\":null}", self.op, self.print_d())
+            result = format!("\"op\":{},\"d\":{},\"t\":null,\"s\":null", self.op, self.d);
         }
-        format!("{\"op\":{},\"d\":{},\"t\":{},\"s\":{}}", self.op, self.print_d(), self.t, self.s)
-    }
-
-    fn print_d(&self) -> String {
-        if self.d == '' {
-            "null"
-        }
-        self.d
-    }
-}
-
-async fn read_stdin(tx: futures_channel::mpsc::UnboundedSender<Message>) {
-    let mut stdin = tokio::io::stdin();
-    loop {
-        let mut buf = vec![0; 1024];
-        let n = match stdin.read(&mut buf).await {
-            Err(_) | Ok(0) => break,
-            Ok(n) => n,
-        };
-        buf.truncate(n);
-        tx.unbounded_send(Message::binary(buf)).unwrap();
+        result = format!("\"op\":{},\"d\":{},\"t\":{},\"s\":{}", self.op, self.d, self.t, self.s);
+        "{".to_string() + &result + "}"
     }
 }
 
 #[tokio::main]
 async fn main() {
-    // use skeuit::schema::messages::dsl::*;
+    // Create initial sequence number
+    let seq_num = Mutex::new(1u64);
 
     // Import .env vars
     dotenv().ok();
@@ -99,22 +86,13 @@ async fn main() {
 
     println!("Starting WS handshake...");
     let addr = url::Url::parse(&(resp["url"].clone() + "?v=9&encoding=json")).unwrap();
-    let (stdin_tx, stdin_rx) = futures_channel::mpsc::unbounded();
-    tokio::spawn(read_stdin(stdin_tx));
-    let (ws_stream, resp) = connect_async(addr).await.expect("Failed to connect");
-    println!("{:?}", resp);
+    let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
+    let init_request = Packet::new(1, "null".to_string(), "null".to_string(), 0);
 
-    let (write, read) = ws_stream.split();
+    ws_stream.send(Message::text(init_request.to_string())).await.expect("Failed to initiate handshake");
 
-    let stdin_to_ws = stdin_rx.map(Ok).forward(write);
-    let ws_to_stdout = {
-        read.for_each(|message| async {
-            let data = message.unwrap().into_data();
-            tokio::io::stdout().write_all(&data).await.unwrap();
-        })
-    };
-
-    pin_mut!(stdin_to_ws, ws_to_stdout);
-    future::select(stdin_to_ws, ws_to_stdout).await;
-    println!("WebSocket handshake has been successfully completed");
+    while let Some(msg) = ws_stream.next().await {
+        let msg = msg.unwrap();
+        println!("{:?}", msg);
+    }
 }
