@@ -7,6 +7,7 @@ use std::{
     // io::Error as IoError,
     // net::SocketAddr,
     sync::Mutex,
+    time::Duration,
 };
 // use diesel::prelude::*;
 use diesel::pg::PgConnection;
@@ -25,7 +26,7 @@ struct Bot {
     heartbeat_int: u64,
     session_id: String,
     database: Pool<ConnectionManager<PgConnection>>,
-    stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     connected: bool,
 }
 
@@ -39,30 +40,81 @@ impl Bot {
             heartbeat_int: heartbeat,
             session_id: "".to_owned(),
             database: pool,
-            stream: ws,
+            ws: ws,
             connected: false,
         }
     }
 
-    pub fn run(&self) {
-        // create mpsc
-        // create interval
+    pub async fn run(&self) {
+        let (tx, mut rx) = futures_channel::mpsc::channel::<Packet>(4096);
+        let (mut ws_sender, mut ws_receiver) = self.ws.split();
+        let mut interval = tokio::time::interval(Duration::from_millis(self.heartbeat_int));
+        let mut has_heartbeat = true;
 
-        // create read thread
-
-        // write loop
-            // if connected
-                // heartbeat on interval
-                // on task, spawn thread
-            // else
-                // break;
-        // reconnect
+        loop {
+            tokio::select! {
+                msg = ws_receiver.next() => {
+                    match msg {
+                        Some(msg) => {
+                            let msg = msg.unwrap();
+                            if msg.is_text() || msg.is_binary() {
+                                self.handle_packet(Packet::from(msg.into_text().unwrap()));
+                            } else if msg.is_close() {
+                                break;
+                            }
+                        },
+                        None => {
+                            let x_thread_msg = rx.try_next().unwrap();
+                            match x_thread_msg {
+                                Some(x_thread_msg) => {
+                                    // handle cross thread message
+                                },
+                                None => continue,
+                            }
+                        },
+                    }
+                }
+                _ = interval.tick() => {
+                    if has_heartbeat {
+                        ws_sender.send(Message::Text(self.heartbeat()))
+                            .await
+                            .expect("Failed to send heartbeat");
+                        has_heartbeat = false;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        self.reconnect_or_close(true);
     }
 
     async fn get_sequence_number(&self) -> u64 {
         let mut seq_num = self.seq_num.lock().unwrap();
         *seq_num += 1;
         *seq_num
+    }
+
+    /*
+    some amount of handlers for tasks
+    */
+    async fn handle_packet(&self, packet: Packet) {
+        println!("Packet received: {}", packet.to_string());
+    }
+
+    fn heartbeat(&self) -> String {
+        Packet::new(1, "null".to_owned(), "null".to_owned(), 0).to_string()
+    }
+
+    async fn reconnect_or_close(&self, is_reconnect: bool) {
+        if is_reconnect {
+            loop {
+                // perform reconnect
+                break;
+            }
+            self.run();
+        }
+        // perform close
     }
 }
 
@@ -96,7 +148,6 @@ async fn main() {
     println!("Starting WS handshake...");
     let addr = url::Url::parse(&(resp["url"].clone() + "?v=9&encoding=json")).expect("Received bad url");
     let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
-    let init_request = Packet::new(1, "null".to_owned(), "null".to_owned(), 0);
     let init_msg = ws_stream.next().await.unwrap().expect("Failed to parse a response");
     let resp_packet = Packet::from(init_msg.into_text().unwrap());
     println!("{}", resp_packet.to_string());
