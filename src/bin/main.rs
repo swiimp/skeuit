@@ -1,23 +1,20 @@
 extern crate diesel;
 extern crate dotenv;
 
-use std::{
-    collections::HashMap,
-    env,
-    sync::Mutex,
-    time::Duration,
-};
 use async_recursion::async_recursion;
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
 use dotenv::dotenv;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
+use serde_json::{json, Value};
 use skeuit::{establish_connection, packet::Packet};
+use std::{collections::HashMap, env, sync::Mutex, time::Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 struct Bot {
     token: String,
+    os: String,
+    intents: u64,
     seq_num: Mutex<u64>,
     database: Pool<ConnectionManager<PgConnection>>,
     uri: String,
@@ -28,13 +25,16 @@ struct Bot {
 impl Bot {
     pub fn new(
         t: String,
-        s: Mutex<u64>,
+        o: String,
+        i: u64,
         pool: Pool<ConnectionManager<PgConnection>>,
         u: String,
     ) -> Bot {
         Bot {
             token: t,
-            seq_num: s,
+            os: o,
+            intents: i,
+            seq_num: Mutex::new(0u64),
             database: pool,
             uri: u,
             heartbeat_int: 0,
@@ -46,18 +46,34 @@ impl Bot {
     pub async fn run(&mut self) {
         // Finish connecting
         println!("Starting WS handshake...");
-        let addr =
-            url::Url::parse(&self.uri).expect("Received bad url");
+        let addr = url::Url::parse(&self.uri).expect("Received bad url");
         let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
-        let init_msg = ws_stream
-            .next()
-            .await
-            .unwrap()
-            .expect("Failed to parse a response");
-        // Retrieve and save heartbeat interval
-        let resp_packet = Packet::from(init_msg.into_text().unwrap());
-        println!("{}", resp_packet.to_string());
-        self.extract_and_set_heartbeat(resp_packet);
+        if self.heartbeat_int == 0 {
+            let init_msg = ws_stream
+                .next()
+                .await
+                .unwrap()
+                .expect("Failed to parse an initial response");
+            // Retrieve and save heartbeat interval
+            let init_packet = Packet::from(init_msg.into_text().unwrap());
+            self.extract_and_set_heartbeat(init_packet);
+        }
+        if self.session_id == "" {
+            // Identify
+            ws_stream
+                .send(Message::Text(self.id_packet()))
+                .await
+                .expect("Failed to send 'Identify' packet");
+            // Receive session_id
+            let id_msg = ws_stream
+                .next()
+                .await
+                .unwrap()
+                .expect("Failed to parse an ID response");
+            let id_packet = Packet::from(id_msg.into_text().unwrap());
+            self.extract_and_set_session_id_and_seq_num(id_packet);
+        }
+        println!("Handshake complete!");
 
         let (tx, mut rx) = futures_channel::mpsc::channel::<Packet>(4096);
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -71,22 +87,21 @@ impl Bot {
                         Some(msg) => {
                             let msg = msg.unwrap();
                             if msg.is_text() || msg.is_binary() {
-                                let new_packet = Packet::from(msg.into_text().unwrap());
-                                println!("Packet received: {}", new_packet.to_string());
-                                self.handle_packet(new_packet).await;
+                                self.handle_packet(Packet::from(msg.into_text().unwrap())).await;
                             } else if msg.is_close() {
+                                println!("CONNECTION CLOSED");
                                 break;
                             }
                         },
                         None => {},
                     }
-                    let x_thread_msg = rx.try_next().unwrap();
-                    match x_thread_msg {
-                        Some(x_thread_msg) => {
-                            // handle cross thread message
-                        },
-                        None => continue,
-                    }
+                    // let x_thread_msg = rx.try_next().unwrap();
+                    // match x_thread_msg {
+                    //     Some(x_thread_msg) => {
+                    //         // handle cross thread message
+                    //     },
+                    //     None => continue,
+                    // }
                 }
                 _ = interval.tick() => {
                     if has_heartbeat {
@@ -104,14 +119,13 @@ impl Bot {
     }
 
     // async helper functions
-    async fn get_sequence_number(&self) -> u64 {
-        let mut seq_num = self.seq_num.lock().unwrap();
-        *seq_num += 1;
-        *seq_num
-    }
-
     async fn handle_packet(&self, packet: Packet) {
         println!("Packet received: {}", packet.to_string());
+    }
+
+    async fn set_seq_num(&self, s_num: u64) {
+        let mut seq_num = self.seq_num.lock().unwrap();
+        *seq_num = s_num;
     }
 
     #[async_recursion]
@@ -131,26 +145,49 @@ impl Bot {
         Packet::new(1, "null".to_owned(), "null".to_owned(), 0).to_string()
     }
 
+    fn id_packet(&self) -> String {
+        let data = json!({
+            "token": self.token,
+            "properties": {
+                "$os": self.os,
+                "$browser": "skeuit",
+                "$device": "skeuit"
+            },
+            "intents": self.intents
+        });
+        Packet::new(2, data.to_string(), "null".to_owned(), 0).to_string()
+    }
+
     fn extract_and_set_heartbeat(&mut self, init_packet: Packet) {
         let data: Value = serde_json::from_str(&(init_packet.clone()).d).unwrap();
-        let heartbeat_interval = serde_json::to_string(&data["heartbeat_interval"])
+        self.heartbeat_int = serde_json::to_string(&data["heartbeat_interval"])
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        println!("heartbeat_interval = {}", heartbeat_interval);
-        self.heartbeat_int = heartbeat_interval;
+    }
+
+    fn extract_and_set_session_id_and_seq_num(&mut self, id_packet: Packet) {
+        let data: Value = serde_json::from_str(&(id_packet.to_string())).unwrap();
+        self.session_id = serde_json::to_string(&data["d"]["session_id"]).unwrap();
+        self.set_seq_num(
+            serde_json::to_string(&data["s"])
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+        );
     }
 }
-
 
 #[tokio::main]
 async fn main() {
     // Import .env vars
     dotenv().ok();
     let token = env::var("DISCORD_TOKEN").expect("Expected a token");
-
-    // Create initial sequence number
-    let seq_num = Mutex::new(1u64);
+    let os = env::var("DISCORD_OS").expect("Expected an os");
+    let intents = env::var("DISCORD_INTENTS")
+        .unwrap()
+        .parse::<u64>()
+        .expect("Expected intents integer");
 
     // Create connection pool
     println!("Establishing database connection...");
@@ -168,6 +205,12 @@ async fn main() {
     println!("URL received, {}", resp["url"]);
 
     // Instantiate Bot and continue connecting
-    let mut bot = Bot::new(token, seq_num, pool, resp["url"].clone() + "?v=9&encoding=json");
+    let mut bot = Bot::new(
+        token,
+        os,
+        intents,
+        pool,
+        format!("{}?v=9&encoding=json", resp["url"]),
+    );
     bot.run().await;
 }
