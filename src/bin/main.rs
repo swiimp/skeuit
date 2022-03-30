@@ -11,6 +11,10 @@ use skeuit::{establish_connection, packet::Packet};
 use std::{collections::HashMap, env, sync::Mutex, time::Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
+enum Flag {
+    Heartbeat,
+}
+
 struct Bot {
     token: String,
     os: String,
@@ -20,6 +24,7 @@ struct Bot {
     uri: String,
     heartbeat_int: u64,
     session_id: String,
+    flags: Mutex<u8>,
 }
 
 impl Bot {
@@ -39,6 +44,7 @@ impl Bot {
             uri: u,
             heartbeat_int: 0,
             session_id: "".to_owned(),
+            flags: Mutex::new(0u8),
         }
     }
 
@@ -108,7 +114,7 @@ impl Bot {
                         ws_sender.send(Message::Text(self.heartbeat_packet()))
                             .await
                             .expect("Failed to send heartbeat");
-                        has_heartbeat = false;
+                        self.set_flag(Flag::Heartbeat, false);
                     } else {
                         break;
                     }
@@ -138,6 +144,15 @@ impl Bot {
             self.run().await;
         }
         // perform close
+    }
+
+    async fn set_flag(&mut self, flag: Flag, value: bool) {
+        let mut flags = self.flags.lock().unwrap();
+        let mask = self.get_mask(flag);
+        let is_set = *flags & mask;
+        if !((is_set > 0) == value) {
+            *flags = *flags ^ mask;
+        }
     }
 
     // sync helper functions
@@ -175,6 +190,12 @@ impl Bot {
                 .parse::<u64>()
                 .unwrap(),
         );
+    }
+
+    fn get_mask(&self, key: Flag) -> u8 {
+        match key {
+            Flag::Heartbeat => 1,
+        }
     }
 }
 
