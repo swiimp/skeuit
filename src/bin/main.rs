@@ -51,7 +51,6 @@ impl Bot {
     #[async_recursion]
     pub async fn run(&mut self) {
         // Finish connecting
-        let mut just_connected = true;
         println!("Starting WS handshake...");
         let addr = url::Url::parse(&self.uri).expect("Received bad url");
         let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
@@ -64,6 +63,7 @@ impl Bot {
             // Retrieve and save heartbeat interval
             let init_packet = Packet::from(init_msg.into_text().unwrap());
             self.extract_and_set_heartbeat(init_packet);
+            self.set_flag(Flag::Heartbeat, true).await;
         }
         if self.session_id == "" {
             // Identify
@@ -97,20 +97,12 @@ impl Bot {
                                 println!("Packet received: {}", packet.to_string());
                                 match packet.op {
                                     11 => {
-                                        if just_connected {
-                                            just_connected = false;
-                                            self.set_flag(Flag::Heartbeat, false).await;
-                                            ws_sender.send(Message::Text(self.heartbeat_packet()))
-                                                .await
-                                                .expect("Failed to send heartbeat");
-                                        } else {
-                                            self.set_flag(Flag::Heartbeat, true).await;
-                                        }
+                                        self.set_flag(Flag::Heartbeat, true).await;
                                     },
                                     _ => {},
                                 }
                             } else if msg.is_close() {
-                                println!("CONNECTION CLOSED");
+                                println!("CONNECTION CLOSED.");
                                 break;
                             }
                         },
@@ -126,11 +118,13 @@ impl Bot {
                 }
                 _ = interval.tick() => {
                     if self.check_flag(Flag::Heartbeat).await > 0 {
+                        println!("HEARTBEAT SUCCESSFUL.");
                         ws_sender.send(Message::Text(self.heartbeat_packet()))
                             .await
                             .expect("Failed to send heartbeat");
                         self.set_flag(Flag::Heartbeat, false).await;
                     } else {
+                        println!("HEARTBEAT FAILED. ZOMBIFIED CONNECTION.");
                         break;
                     }
                 }
