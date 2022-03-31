@@ -51,7 +51,7 @@ impl Bot {
     #[async_recursion]
     pub async fn run(&mut self) {
         // Finish connecting
-        let just_connected = true;
+        let mut just_connected = true;
         println!("Starting WS handshake...");
         let addr = url::Url::parse(&self.uri).expect("Received bad url");
         let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
@@ -78,7 +78,7 @@ impl Bot {
                 .unwrap()
                 .expect("Failed to parse an ID response");
             let id_packet = Packet::from(id_msg.into_text().unwrap());
-            self.extract_and_set_session_id_and_seq_num(id_packet);
+            self.extract_and_set_session_id_and_seq_num(id_packet).await;
         }
         println!("Handshake complete!");
 
@@ -98,11 +98,13 @@ impl Bot {
                                 match packet.op {
                                     11 => {
                                         if just_connected {
-                                            ws_sender.send(Message::Text(self.heartbeat_packet()));
-                                            self.set_flag(Flag::Heartbeat, false);
                                             just_connected = false;
+                                            self.set_flag(Flag::Heartbeat, false).await;
+                                            ws_sender.send(Message::Text(self.heartbeat_packet()))
+                                                .await
+                                                .expect("Failed to send heartbeat");
                                         } else {
-                                            self.set_flag(Flag::Heartbeat, true);
+                                            self.set_flag(Flag::Heartbeat, true).await;
                                         }
                                     },
                                     _ => {},
@@ -123,11 +125,11 @@ impl Bot {
                     // }
                 }
                 _ = interval.tick() => {
-                    if self.check_flag(Flag::Heartbeat) > 0 {
+                    if self.check_flag(Flag::Heartbeat).await > 0 {
                         ws_sender.send(Message::Text(self.heartbeat_packet()))
                             .await
                             .expect("Failed to send heartbeat");
-                        self.set_flag(Flag::Heartbeat, false);
+                        self.set_flag(Flag::Heartbeat, false).await;
                     } else {
                         break;
                     }
@@ -170,6 +172,18 @@ impl Bot {
         }
     }
 
+    async fn extract_and_set_session_id_and_seq_num(&mut self, id_packet: Packet) {
+        let data: Value = serde_json::from_str(&(id_packet.to_string())).unwrap();
+        self.session_id = serde_json::to_string(&data["d"]["session_id"]).unwrap();
+        self.set_seq_num(
+            serde_json::to_string(&data["s"])
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+        )
+        .await;
+    }
+
     // sync helper functions
     fn heartbeat_packet(&self) -> String {
         Packet::new(1, "null".to_owned(), "null".to_owned(), 0).to_string()
@@ -194,17 +208,6 @@ impl Bot {
             .unwrap()
             .parse::<u64>()
             .unwrap();
-    }
-
-    fn extract_and_set_session_id_and_seq_num(&mut self, id_packet: Packet) {
-        let data: Value = serde_json::from_str(&(id_packet.to_string())).unwrap();
-        self.session_id = serde_json::to_string(&data["d"]["session_id"]).unwrap();
-        self.set_seq_num(
-            serde_json::to_string(&data["s"])
-                .unwrap()
-                .parse::<u64>()
-                .unwrap(),
-        );
     }
 
     fn get_mask(&self, key: Flag) -> u8 {
