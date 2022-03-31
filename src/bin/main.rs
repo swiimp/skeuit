@@ -51,6 +51,7 @@ impl Bot {
     #[async_recursion]
     pub async fn run(&mut self) {
         // Finish connecting
+        let just_connected = true;
         println!("Starting WS handshake...");
         let addr = url::Url::parse(&self.uri).expect("Received bad url");
         let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
@@ -84,7 +85,6 @@ impl Bot {
         let (tx, mut rx) = futures_channel::mpsc::channel::<Packet>(4096);
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let mut interval = tokio::time::interval(Duration::from_millis(self.heartbeat_int));
-        let mut has_heartbeat = true;
 
         loop {
             tokio::select! {
@@ -93,7 +93,20 @@ impl Bot {
                         Some(msg) => {
                             let msg = msg.unwrap();
                             if msg.is_text() || msg.is_binary() {
-                                self.handle_packet(Packet::from(msg.into_text().unwrap())).await;
+                                let packet = Packet::from(msg.into_text().unwrap());
+                                println!("Packet received: {}", packet.to_string());
+                                match packet.op {
+                                    11 => {
+                                        if just_connected {
+                                            ws_sender.send(Message::Text(self.heartbeat_packet()));
+                                            self.set_flag(Flag::Heartbeat, false);
+                                            just_connected = false;
+                                        } else {
+                                            self.set_flag(Flag::Heartbeat, true);
+                                        }
+                                    },
+                                    _ => {},
+                                }
                             } else if msg.is_close() {
                                 println!("CONNECTION CLOSED");
                                 break;
@@ -110,7 +123,7 @@ impl Bot {
                     // }
                 }
                 _ = interval.tick() => {
-                    if has_heartbeat {
+                    if self.check_flag(Flag::Heartbeat) > 0 {
                         ws_sender.send(Message::Text(self.heartbeat_packet()))
                             .await
                             .expect("Failed to send heartbeat");
@@ -125,10 +138,6 @@ impl Bot {
     }
 
     // async helper functions
-    async fn handle_packet(&self, packet: Packet) {
-        println!("Packet received: {}", packet.to_string());
-    }
-
     async fn set_seq_num(&self, s_num: u64) {
         let mut seq_num = self.seq_num.lock().unwrap();
         *seq_num = s_num;
@@ -144,6 +153,12 @@ impl Bot {
             self.run().await;
         }
         // perform close
+    }
+
+    async fn check_flag(&self, flag: Flag) -> u8 {
+        let flags = self.flags.lock().unwrap();
+        let mask = self.get_mask(flag);
+        *flags & mask
     }
 
     async fn set_flag(&mut self, flag: Flag, value: bool) {
