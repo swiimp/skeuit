@@ -9,6 +9,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 enum Flag {
     Heartbeat,
+    Reconnect,
 }
 
 pub struct Bot {
@@ -18,6 +19,7 @@ pub struct Bot {
     seq_num: Mutex<u64>,
     database: Pool<ConnectionManager<PgConnection>>,
     uri: String,
+    jobs: Mutex<Vec<Packet>>,
     heartbeat_int: u64,
     session_id: String,
     flags: Mutex<u8>,
@@ -38,6 +40,7 @@ impl Bot {
             seq_num: Mutex::new(0u64),
             database: pool,
             uri: u,
+            jobs: Mutex::new(vec![]),
             heartbeat_int: 0,
             session_id: "".to_owned(),
             flags: Mutex::new(0u8),
@@ -50,17 +53,16 @@ impl Bot {
         println!("Starting WS handshake...");
         let addr = url::Url::parse(&self.uri).expect("Received bad url");
         let (mut ws_stream, _) = connect_async(&addr).await.expect("Failed to connect");
-        if self.heartbeat_int == 0 {
-            let init_msg = ws_stream
-                .next()
-                .await
-                .unwrap()
-                .expect("Failed to parse an initial response");
-            // Retrieve and save heartbeat interval
-            let init_packet = Packet::from(init_msg.into_text().unwrap());
-            self.extract_and_set_heartbeat(init_packet);
-            self.set_flag(Flag::Heartbeat, true).await;
-        }
+        let init_msg = ws_stream
+            .next()
+            .await
+            .unwrap()
+            .expect("Failed to parse an initial response");
+        // Retrieve and save heartbeat interval
+        let init_packet = Packet::from(init_msg.into_text().unwrap());
+        self.extract_and_set_heartbeat(init_packet);
+        self.set_flag(Flag::Heartbeat, true).await;
+
         if self.session_id == "" {
             // Identify
             ws_stream
@@ -75,10 +77,28 @@ impl Bot {
                 .expect("Failed to parse an ID response");
             let id_packet = Packet::from(id_msg.into_text().unwrap());
             self.extract_and_set_session_id_and_seq_num(id_packet).await;
+        } else {
+            println!("session_id found. Resuming session...");
+            // Resume old session
+            ws_stream
+                .send(Message::Text(self.resume_packet().await))
+                .await
+                .expect("Failed to resume session");
+            // Send replay to queue
+            println!("Replaying missed events...");
+            loop {
+                match ws_stream.next().await {
+                    Some(msg) => {
+                        let packet = Packet::from(msg.unwrap().into_text().unwrap());
+                        println!("Packet received: {}", packet.to_string());
+                        self.queue_job(packet).await;
+                    },
+                    None => break,
+                }
+            }
         }
         println!("Handshake complete!");
 
-        let (tx, mut rx) = futures_channel::mpsc::channel::<Packet>(4096);
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let mut interval = tokio::time::interval(Duration::from_millis(self.heartbeat_int));
 
@@ -92,6 +112,9 @@ impl Bot {
                                 let packet = Packet::from(msg.into_text().unwrap());
                                 println!("Packet received: {}", packet.to_string());
                                 match packet.op {
+                                    0 => {
+                                        self.set_seq_num(packet.s).await;
+                                    },
                                     11 => {
                                         self.set_flag(Flag::Heartbeat, true).await;
                                     },
@@ -104,13 +127,9 @@ impl Bot {
                         },
                         None => {},
                     }
-                    // let x_thread_msg = rx.try_next().unwrap();
-                    // match x_thread_msg {
-                    //     Some(x_thread_msg) => {
-                    //         // handle cross thread message
-                    //     },
-                    //     None => continue,
-                    // }
+                    println!("Performing queued job...");
+                    let packet = self.retrieve_job();
+                    // do work with packet
                 }
                 _ = interval.tick() => {
                     if self.check_flag(Flag::Heartbeat).await > 0 {
@@ -121,30 +140,27 @@ impl Bot {
                         self.set_flag(Flag::Heartbeat, false).await;
                     } else {
                         println!("HEARTBEAT FAILED. ZOMBIFIED CONNECTION.");
+                        ws_sender.close()
+                            .await
+                            .expect("Failed to close connection");
+                        self.set_flag(Flag::Reconnect, true).await;
                         break;
                     }
                 }
             }
         }
-        self.reconnect_or_close(true).await;
+        if self.check_flag(Flag::Reconnect).await > 0 {
+            self.set_flag(Flag::Reconnect, false).await;
+            self.run().await;
+        }
     }
 
     // async helper functions
     async fn set_seq_num(&self, s_num: u64) {
         let mut seq_num = self.seq_num.lock().unwrap();
-        *seq_num = s_num;
-    }
-
-    #[async_recursion]
-    async fn reconnect_or_close(&mut self, is_reconnect: bool) {
-        if is_reconnect {
-            loop {
-                // perform reconnect
-                break;
-            }
-            self.run().await;
+        if s_num > *seq_num {
+            *seq_num = s_num;
         }
-        // perform close
     }
 
     async fn check_flag(&self, flag: Flag) -> u8 {
@@ -153,13 +169,33 @@ impl Bot {
         *flags & mask
     }
 
-    async fn set_flag(&mut self, flag: Flag, value: bool) {
+    async fn set_flag(&self, flag: Flag, value: bool) {
         let mut flags = self.flags.lock().unwrap();
         let mask = self.get_mask(flag);
         let is_set = *flags & mask;
         if !((is_set > 0) == value) {
             *flags = *flags ^ mask;
         }
+    }
+
+    async fn queue_job(&self, packet: Packet) {
+        let mut jobs = self.jobs.lock().unwrap();
+        jobs.push(packet);
+    }
+
+    async fn retrieve_job(&self) -> Packet {
+        let mut jobs = self.jobs.lock().unwrap();
+        jobs.remove(0)
+    }
+
+    async fn resume_packet(&self) -> String {
+        let seq_num = self.seq_num.lock().unwrap();
+        let data = json!({
+            "token": self.token,
+            "session_id": self.session_id,
+            "seq": *seq_num
+        });
+        Packet::new(6, data.to_string(), "null".to_owned(), 0).to_string()
     }
 
     async fn extract_and_set_session_id_and_seq_num(&mut self, id_packet: Packet) {
@@ -192,6 +228,7 @@ impl Bot {
         Packet::new(2, data.to_string(), "null".to_owned(), 0).to_string()
     }
 
+
     fn extract_and_set_heartbeat(&mut self, init_packet: Packet) {
         let data: Value = serde_json::from_str(&(init_packet.clone()).d).unwrap();
         self.heartbeat_int = serde_json::to_string(&data["heartbeat_interval"])
@@ -203,6 +240,7 @@ impl Bot {
     fn get_mask(&self, key: Flag) -> u8 {
         match key {
             Flag::Heartbeat => 1,
+            Flag::Reconnect => 2,
         }
     }
 }
