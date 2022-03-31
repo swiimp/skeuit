@@ -37,13 +37,13 @@ impl Bot {
             token: t,
             os: o,
             intents: i,
-            seq_num: Mutex::new(0u64),
+            seq_num: Mutex::new(0),
             database: pool,
             uri: u,
             jobs: Mutex::new(vec![]),
             heartbeat_int: 0,
             session_id: "".to_owned(),
-            flags: Mutex::new(0u8),
+            flags: Mutex::new(0),
         }
     }
 
@@ -114,6 +114,19 @@ impl Bot {
                                 match packet.op {
                                     0 => {
                                         self.set_seq_num(packet.s).await;
+                                        self.queue_job(packet).await;
+                                    },
+                                    1 => {
+                                        self.set_flag(Flag::Heartbeat, true).await;
+                                    },
+                                    7 => {
+                                        self.set_flag(Flag::Reconnect, true).await;
+                                        break;
+                                    },
+                                    9 => {
+                                        self.session_id = String::from("");
+                                        self.set_flag(Flag::Reconnect, true).await;
+                                        break;
                                     },
                                     11 => {
                                         self.set_flag(Flag::Heartbeat, true).await;
@@ -127,9 +140,6 @@ impl Bot {
                         },
                         None => {},
                     }
-                    println!("Performing queued job...");
-                    let packet = self.retrieve_job();
-                    // do work with packet
                 }
                 _ = interval.tick() => {
                     if self.check_flag(Flag::Heartbeat).await > 0 {
@@ -146,6 +156,15 @@ impl Bot {
                         self.set_flag(Flag::Reconnect, true).await;
                         break;
                     }
+                }
+            }
+            println!("Checking job queue...");
+            loop {
+                match self.retrieve_job().await {
+                    Some(packet) => {
+                        // do work with packet
+                    },
+                    None => continue,
                 }
             }
         }
@@ -183,9 +202,12 @@ impl Bot {
         jobs.push(packet);
     }
 
-    async fn retrieve_job(&self) -> Packet {
+    async fn retrieve_job(&self) -> Option<Packet> {
         let mut jobs = self.jobs.lock().unwrap();
-        jobs.remove(0)
+        if jobs.len() > 0 {
+            return Some(jobs.remove(0))
+        }
+        None
     }
 
     async fn resume_packet(&self) -> String {
