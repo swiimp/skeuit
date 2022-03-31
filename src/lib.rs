@@ -1,3 +1,4 @@
+pub mod bot;
 pub mod models;
 pub mod packet;
 pub mod schema;
