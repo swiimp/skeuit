@@ -59,7 +59,12 @@ impl Bot {
             .unwrap()
             .expect("Failed to parse an initial response");
         // Retrieve and save heartbeat interval
-        let init_packet = Packet::from(init_msg.into_text().unwrap());
+        let init_packet = match Packet::from(init_msg.into_text().unwrap()) {
+            Ok(packet) => packet,
+            Err(error) => {
+                panic!("Problem reading packet data: {:?}", error)
+            },
+        };
         self.extract_and_set_heartbeat(init_packet);
         self.set_flag(Flag::Heartbeat, true).await;
 
@@ -75,7 +80,7 @@ impl Bot {
                 .await
                 .unwrap()
                 .expect("Failed to parse an ID response");
-            let id_packet = Packet::from(id_msg.into_text().unwrap());
+            let id_packet = Packet::from(id_msg.into_text().unwrap()).unwrap();
             self.extract_and_set_session_id_and_seq_num(id_packet).await;
         } else {
             println!("session_id found. Resuming session...");
@@ -89,9 +94,18 @@ impl Bot {
             loop {
                 match ws_stream.next().await {
                     Some(msg) => {
-                        let packet = Packet::from(msg.unwrap().into_text().unwrap());
-                        println!("Packet received: {}", packet.to_string());
-                        self.queue_job(packet).await;
+                        let packet = match Packet::from(msg.unwrap().into_text().unwrap()) {
+                            Ok(packet) => packet,
+                            Err(error) => {
+                                println!("Problem reading packet data: {:?}", error);
+                                // TODO: Find a permanent solution
+                                Packet::from(self.heartbeat_packet()).unwrap()
+                            },
+                        };
+                        println!("REPLAY Packet received: {}", packet.to_string());
+                        if packet.op == 0 {
+                            self.queue_job(packet).await;
+                        }
                     },
                     None => break,
                 }
@@ -109,7 +123,13 @@ impl Bot {
                         Some(msg) => {
                             let msg = msg.unwrap();
                             if msg.is_text() || msg.is_binary() {
-                                let packet = Packet::from(msg.into_text().unwrap());
+                                let packet = match Packet::from(msg.into_text().unwrap()) {
+                                    Ok(packet) => packet,
+                                    Err(error) => {
+                                        println!("Problem reading packet data: {:?}", error);
+                                        continue;
+                                    },
+                                };
                                 println!("Packet received: {}", packet.to_string());
                                 match packet.op {
                                     0 => {
@@ -162,9 +182,9 @@ impl Bot {
             loop {
                 match self.retrieve_job().await {
                     Some(packet) => {
-                        // do work with packet
+                        println!("{}", packet.to_string());
                     },
-                    None => continue,
+                    None => break,
                 }
             }
         }

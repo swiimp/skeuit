@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::io::Error;
 
 #[derive(Clone)]
 pub struct Packet {
@@ -18,7 +19,7 @@ impl Packet {
         }
     }
 
-    pub fn from(packet_data: String) -> Packet {
+    pub fn from(packet_data: String) -> Result<Packet, Error> {
         let json: Value = serde_json::from_str(&packet_data).unwrap();
         let mut seq_num: u64 = 0;
         if serde_json::to_string(&json["s"]).unwrap() != "null" {
@@ -27,7 +28,7 @@ impl Packet {
                 .parse::<u64>()
                 .unwrap();
         }
-        Packet {
+        Ok(Packet {
             op: serde_json::to_string(&json["op"])
                 .unwrap()
                 .parse::<u64>()
@@ -35,7 +36,7 @@ impl Packet {
             d: serde_json::to_string(&json["d"]).unwrap(),
             t: serde_json::to_string(&json["t"]).unwrap(),
             s: seq_num,
-        }
+        })
     }
 
     pub fn to_string(&self) -> String {
