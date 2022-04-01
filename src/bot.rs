@@ -103,8 +103,7 @@ impl Bot {
                             Ok(packet) => packet,
                             Err(error) => {
                                 println!("Problem reading packet data: {:?}", error);
-                                // TODO: Find a permanent solution
-                                Packet::from(self.heartbeat_packet()).unwrap()
+                                continue;
                             },
                         };
                         println!("REPLAY Packet received: {}", packet.to_string());
