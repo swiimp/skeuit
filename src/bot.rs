@@ -80,7 +80,12 @@ impl Bot {
                 .await
                 .unwrap()
                 .expect("Failed to parse an ID response");
-            let id_packet = Packet::from(id_msg.into_text().unwrap()).unwrap();
+            let id_packet = match Packet::from(id_msg.into_text().unwrap()) {
+                Ok(packet) => packet,
+                Err(error) => {
+                    panic!("Problem reading packet data: {:?}", error)
+                },
+            };
             self.extract_and_set_session_id_and_seq_num(id_packet).await;
         } else {
             println!("session_id found. Resuming session...");

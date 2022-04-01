@@ -1,5 +1,4 @@
-use serde_json::Value;
-use std::io::Error;
+use serde_json::{Value, Error};
 
 #[derive(Clone)]
 pub struct Packet {
@@ -20,7 +19,13 @@ impl Packet {
     }
 
     pub fn from(packet_data: String) -> Result<Packet, Error> {
-        let json: Value = serde_json::from_str(&packet_data).unwrap();
+        let json: Value = match serde_json::from_str(&packet_data) {
+            Ok(json) => json,
+            Err(error) => {
+                println!("Expected JSON data, received: {:?}", &packet_data);
+                return Err(error)
+            },
+        };
         let mut seq_num: u64 = 0;
         if serde_json::to_string(&json["s"]).unwrap() != "null" {
             seq_num = serde_json::to_string(&json["s"])
