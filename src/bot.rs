@@ -1,10 +1,10 @@
+use crate::packet::Packet;
 use async_recursion::async_recursion;
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use crate::packet::Packet;
-use std::{sync::Mutex, time::Duration};
+use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 enum Flag {
@@ -16,13 +16,13 @@ pub struct Bot {
     token: String,
     os: String,
     intents: u64,
-    seq_num: Mutex<u64>,
+    seq_num: u64,
     database: Pool<ConnectionManager<PgConnection>>,
     uri: String,
-    jobs: Mutex<Vec<Packet>>,
+    jobs: Vec<Packet>,
     heartbeat_int: u64,
     session_id: String,
-    flags: Mutex<u8>,
+    flags: u8,
 }
 
 impl Bot {
@@ -37,13 +37,13 @@ impl Bot {
             token: t,
             os: o,
             intents: i,
-            seq_num: Mutex::new(0),
+            seq_num: 0,
             database: pool,
             uri: u,
-            jobs: Mutex::new(vec![]),
+            jobs: vec![],
             heartbeat_int: 0,
             session_id: "".to_owned(),
-            flags: Mutex::new(0),
+            flags: 0,
         }
     }
 
@@ -63,10 +63,10 @@ impl Bot {
             Ok(packet) => packet,
             Err(error) => {
                 panic!("Problem reading packet data: {:?}", error)
-            },
+            }
         };
         self.extract_and_set_heartbeat(init_packet);
-        self.set_flag(Flag::Heartbeat, true).await;
+        self.set_flag(Flag::Heartbeat, true);
 
         if self.session_id == "" {
             // Identify
@@ -84,14 +84,14 @@ impl Bot {
                 Ok(packet) => packet,
                 Err(error) => {
                     panic!("Problem reading packet data: {:?}", error)
-                },
+                }
             };
-            self.extract_and_set_session_id_and_seq_num(id_packet).await;
+            self.extract_and_set_session_id_and_seq_num(id_packet);
         } else {
             println!("session_id found. Resuming session...");
             // Resume old session
             ws_stream
-                .send(Message::Text(self.resume_packet().await))
+                .send(Message::Text(self.resume_packet()))
                 .await
                 .expect("Failed to resume session");
             // Send replay to queue
@@ -104,13 +104,13 @@ impl Bot {
                             Err(error) => {
                                 println!("Problem reading packet data: {:?}", error);
                                 continue;
-                            },
+                            }
                         };
                         println!("REPLAY Packet received: {}", packet.to_string());
                         if packet.op == 0 {
-                            self.queue_job(packet).await;
+                            self.queue_job(packet);
                         }
-                    },
+                    }
                     None => break,
                 }
             }
@@ -137,23 +137,23 @@ impl Bot {
                                 println!("Packet received: {}", packet.to_string());
                                 match packet.op {
                                     0 => {
-                                        self.set_seq_num(packet.s).await;
-                                        self.queue_job(packet).await;
+                                        self.set_seq_num(packet.s);
+                                        self.queue_job(packet);
                                     },
                                     1 => {
-                                        self.set_flag(Flag::Heartbeat, true).await;
+                                        self.set_flag(Flag::Heartbeat, true);
                                     },
                                     7 => {
-                                        self.set_flag(Flag::Reconnect, true).await;
+                                        self.set_flag(Flag::Reconnect, true);
                                         break;
                                     },
                                     9 => {
                                         self.session_id = String::from("");
-                                        self.set_flag(Flag::Reconnect, true).await;
+                                        self.set_flag(Flag::Reconnect, true);
                                         break;
                                     },
                                     11 => {
-                                        self.set_flag(Flag::Heartbeat, true).await;
+                                        self.set_flag(Flag::Heartbeat, true);
                                     },
                                     _ => {},
                                 }
@@ -166,97 +166,42 @@ impl Bot {
                     }
                 }
                 _ = interval.tick() => {
-                    if self.check_flag(Flag::Heartbeat).await > 0 {
+                    if self.check_flag(Flag::Heartbeat) > 0 {
                         println!("HEARTBEAT SUCCESSFUL.");
                         ws_sender.send(Message::Text(self.heartbeat_packet()))
                             .await
                             .expect("Failed to send heartbeat");
-                        self.set_flag(Flag::Heartbeat, false).await;
+                        self.set_flag(Flag::Heartbeat, false);
                     } else {
                         println!("HEARTBEAT FAILED. ZOMBIFIED CONNECTION.");
                         ws_sender.close()
                             .await
                             .expect("Failed to close connection");
-                        self.set_flag(Flag::Reconnect, true).await;
+                        self.set_flag(Flag::Reconnect, true);
                         break;
                     }
                 }
             }
             println!("Checking job queue...");
             loop {
-                match self.retrieve_job().await {
+                match self.retrieve_job() {
                     Some(packet) => {
-                        println!("{}", packet.to_string());
-                    },
+                        self.handle_packet(packet);
+                    }
                     None => break,
                 }
             }
         }
-        if self.check_flag(Flag::Reconnect).await > 0 {
-            self.set_flag(Flag::Reconnect, false).await;
+        if self.check_flag(Flag::Reconnect) > 0 {
+            self.set_flag(Flag::Reconnect, false);
             self.run().await;
         }
     }
 
-    // async helper functions
-    async fn set_seq_num(&self, s_num: u64) {
-        let mut seq_num = self.seq_num.lock().unwrap();
-        if s_num > *seq_num {
-            *seq_num = s_num;
-        }
+    fn handle_packet(&self, packet: Packet) {
+        println!("handle_packet :: {}", packet.to_string());
     }
 
-    async fn check_flag(&self, flag: Flag) -> u8 {
-        let flags = self.flags.lock().unwrap();
-        let mask = self.get_mask(flag);
-        *flags & mask
-    }
-
-    async fn set_flag(&self, flag: Flag, value: bool) {
-        let mut flags = self.flags.lock().unwrap();
-        let mask = self.get_mask(flag);
-        let is_set = *flags & mask;
-        if !((is_set > 0) == value) {
-            *flags = *flags ^ mask;
-        }
-    }
-
-    async fn queue_job(&self, packet: Packet) {
-        let mut jobs = self.jobs.lock().unwrap();
-        jobs.push(packet);
-    }
-
-    async fn retrieve_job(&self) -> Option<Packet> {
-        let mut jobs = self.jobs.lock().unwrap();
-        if jobs.len() > 0 {
-            return Some(jobs.remove(0))
-        }
-        None
-    }
-
-    async fn resume_packet(&self) -> String {
-        let seq_num = self.seq_num.lock().unwrap();
-        let data = json!({
-            "token": self.token,
-            "session_id": self.session_id,
-            "seq": *seq_num
-        });
-        Packet::new(6, data.to_string(), "null".to_owned(), 0).to_string()
-    }
-
-    async fn extract_and_set_session_id_and_seq_num(&mut self, id_packet: Packet) {
-        let data: Value = serde_json::from_str(&(id_packet.to_string())).unwrap();
-        self.session_id = serde_json::to_string(&data["d"]["session_id"]).unwrap();
-        self.set_seq_num(
-            serde_json::to_string(&data["s"])
-                .unwrap()
-                .parse::<u64>()
-                .unwrap(),
-        )
-        .await;
-    }
-
-    // sync helper functions
     fn heartbeat_packet(&self) -> String {
         Packet::new(1, "null".to_owned(), "null".to_owned(), 0).to_string()
     }
@@ -274,6 +219,14 @@ impl Bot {
         Packet::new(2, data.to_string(), "null".to_owned(), 0).to_string()
     }
 
+    fn resume_packet(&self) -> String {
+        let data = json!({
+            "token": self.token,
+            "session_id": self.session_id,
+            "seq": self.seq_num
+        });
+        Packet::new(6, data.to_string(), "null".to_owned(), 0).to_string()
+    }
 
     fn extract_and_set_heartbeat(&mut self, init_packet: Packet) {
         let data: Value = serde_json::from_str(&(init_packet.clone()).d).unwrap();
@@ -281,6 +234,47 @@ impl Bot {
             .unwrap()
             .parse::<u64>()
             .unwrap();
+    }
+
+    fn extract_and_set_session_id_and_seq_num(&mut self, id_packet: Packet) {
+        let data: Value = serde_json::from_str(&(id_packet.to_string())).unwrap();
+        self.session_id = serde_json::to_string(&data["d"]["session_id"]).unwrap();
+        self.set_seq_num(
+            serde_json::to_string(&data["s"])
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+        );
+    }
+
+    fn queue_job(&mut self, packet: Packet) {
+        self.jobs.push(packet);
+    }
+
+    fn retrieve_job(&mut self) -> Option<Packet> {
+        if self.jobs.len() > 0 {
+            return Some(self.jobs.remove(0));
+        }
+        None
+    }
+
+    fn set_seq_num(&mut self, s_num: u64) {
+        if s_num > self.seq_num {
+            self.seq_num = s_num;
+        }
+    }
+
+    fn check_flag(&self, flag: Flag) -> u8 {
+        let mask = self.get_mask(flag);
+        self.flags & mask
+    }
+
+    fn set_flag(&mut self, flag: Flag, value: bool) {
+        let mask = self.get_mask(flag);
+        let is_set = self.flags & mask;
+        if !((is_set > 0) == value) {
+            self.flags = self.flags ^ mask;
+        }
     }
 
     fn get_mask(&self, key: Flag) -> u8 {
