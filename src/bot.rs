@@ -166,7 +166,7 @@ impl Bot {
                     }
                 }
                 _ = interval.tick() => {
-                    if self.check_flag(Flag::Heartbeat) > 0 {
+                    if self.check_flag(Flag::Heartbeat) {
                         println!("HEARTBEAT SUCCESSFUL.");
                         ws_sender.send(Message::Text(self.heartbeat_packet()))
                             .await
@@ -192,7 +192,7 @@ impl Bot {
                 }
             }
         }
-        if self.check_flag(Flag::Reconnect) > 0 {
+        if self.check_flag(Flag::Reconnect) {
             self.set_flag(Flag::Reconnect, false);
             self.run().await;
         }
@@ -264,15 +264,14 @@ impl Bot {
         }
     }
 
-    fn check_flag(&self, flag: Flag) -> u8 {
+    fn check_flag(&self, flag: Flag) -> bool {
         let mask = self.get_mask(flag);
-        self.flags & mask
+        self.flags & mask > 0
     }
 
     fn set_flag(&mut self, flag: Flag, value: bool) {
         let mask = self.get_mask(flag);
-        let is_set = self.flags & mask;
-        if !((is_set > 0) == value) {
+        if self.check_flag(flag) {
             self.flags = self.flags ^ mask;
         }
     }
