@@ -8,16 +8,20 @@ use std::{collections::HashMap, env};
 async fn main() {
     // Import .env vars
     dotenv().ok();
-    let token = env::var("DISCORD_TOKEN").expect("Expected a token");
-    let os = env::var("DISCORD_OS").expect("Expected an os");
+    let token = env::var("DISCORD_TOKEN").expect("Expected DISCORD_TOKEN");
+    let os = env::var("DISCORD_OS").expect("Expected DISCORD_OS");
     let intents = env::var("DISCORD_INTENTS")
-        .unwrap()
+        .expect("Expected DISCORD_INTENTS")
         .parse::<u64>()
-        .expect("Expected intents integer");
+        .expect("Expected DISCORD_INTENTS to be an integer");
+    let database_url = env::var("SKEUIT_DATABASE_URL").expect("Expected SKEUIT_DATABASE_URL");
+    let mode = env::var("SKEUIT_MODE").expect("Expected SKEUIT_MODE");
+    let watched_channels =
+        env::var("SKEUIT_WATCHED_CHANNELS").expect("Expected SKEUIT_WATCHED_CHANNELS");
 
     // Create connection pool
     println!("Establishing database connection...");
-    let pool = establish_connection();
+    let pool = establish_connection(database_url);
     println!("Database connection successfully established");
 
     // Get WS address from Discord API
