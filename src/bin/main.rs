@@ -39,6 +39,8 @@ async fn main() {
         token,
         os,
         intents,
+        mode,
+        watched_channels,
         pool,
         format!("{}?v=9&encoding=json", resp["url"]),
     );

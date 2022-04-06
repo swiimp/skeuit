@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
+#[derive(Copy, Clone)]
 enum Flag {
     Heartbeat,
     Reconnect,
@@ -19,6 +20,8 @@ pub struct Bot {
     seq_num: u64,
     database: Pool<ConnectionManager<PgConnection>>,
     uri: String,
+    mode: String,
+    watched_channels: Vec<u64>,
     jobs: Vec<Packet>,
     heartbeat_int: u64,
     session_id: String,
@@ -30,6 +33,8 @@ impl Bot {
         t: String,
         o: String,
         i: u64,
+        m: String,
+        w_c: String,
         pool: Pool<ConnectionManager<PgConnection>>,
         u: String,
     ) -> Bot {
@@ -40,6 +45,11 @@ impl Bot {
             seq_num: 0,
             database: pool,
             uri: u,
+            mode: m,
+            watched_channels: w_c
+                .split(",")
+                .map(|str| str.parse::<u64>().unwrap())
+                .collect(),
             jobs: vec![],
             heartbeat_int: 0,
             session_id: "".to_owned(),
@@ -183,6 +193,7 @@ impl Bot {
                 }
             }
             println!("Checking job queue...");
+            // TODO: Batch jobs and send to another thread
             loop {
                 match self.retrieve_job() {
                     Some(packet) => {
@@ -271,7 +282,7 @@ impl Bot {
 
     fn set_flag(&mut self, flag: Flag, value: bool) {
         let mask = self.get_mask(flag);
-        if self.check_flag(flag) {
+        if self.check_flag(flag) != value {
             self.flags = self.flags ^ mask;
         }
     }
